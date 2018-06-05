@@ -307,7 +307,6 @@ jobs:
              --password "$OPS_MGR_PWD" \
              configure-director \
              --config config.yml
-
 - name: deploy-director
   build_logs_to_retain: 5
   plan:
@@ -322,6 +321,47 @@ jobs:
       OPS_MGR_PWD: ((ops_mgr_pwd))
     config:
       <<: *APPLY_CHANGES
+
+- name: show-ssh-opsman-script
+  build_logs_to_retain: 5
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - config-director
+      trigger: true
+  - task: show-ssh-opsman-script
+    params:
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      inputs:
+      - name: terraform-state
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -e
+          cp /usr/local/bin/om-linux /usr/local/bin/om
+          cp terraform-state/terraform.tfstate ./
+          OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+          OPS_MANAGER_SSH_PRIVATE_KEY=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ssh_private_key.value')
+          
+          cat <<EOF
+          #!/bin/bash
+          cat << KEY > opsman.pem
+          ${OPS_MANAGER_SSH_PRIVATE_KEY}
+          KEY
+          ssh -i opsman.pem -o "StrictHostKeyChecking=no" -l ubuntu ${OPSMAN_DOMAIN_OR_IP_ADDRESS}
+          EOF
+
 - name: configure-bosh-cli
   build_logs_to_retain: 5
   plan:
