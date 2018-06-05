@@ -30,12 +30,12 @@ resources:
     api_token: ((pivnet_api_token))
     product_slug: elastic-runtime
     product_version: 2\.1\.*
-# - name: stemcell
-#   type: pivnet
-#   source:
-#     api_token: ((pivnet_api_token))
-#     product_slug: stemcells
-#     product_version: 3468\.*
+- name: stemcell
+  type: pivnet
+  source:
+    api_token: ((pivnet_api_token))
+    product_slug: stemcells
+    product_version: 3541\.*
 
 jobs:
 - name: bootstrap-terraform-state
@@ -525,6 +525,49 @@ jobs:
             ${OPSMAN_DOMAIN_OR_IP_ADDRESS} \
             -l ubuntu \
             "~/om-linux --target https://localhost -k -u ${OPS_MGR_USR} -p ${OPS_MGR_PWD} stage-product -p ${PRODUCT_NAME} -v ${PRODUCT_VERSION}"
+
+- name: upload-stemcell
+  build_logs_to_retain: 5
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - upload-pas
+      trigger: true
+    - get: stemcell
+      params:
+        globs: 
+        - "bosh-stemcell-3541\\.*-azure-hyperv-ubuntu-trusty-go_agent\\.tgz"
+      trigger: true
+  - task: upload-stemcell
+    params:
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      inputs:
+      - name: terraform-state
+      - name: stemcell
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -eu
+          cp /usr/local/bin/om-linux /usr/local/bin/om
+          cp terraform-state/terraform.tfstate ./
+          OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+          om --target https://${OPSMAN_DOMAIN_OR_IP_ADDRESS} -k \
+              -u ${OPS_MGR_USR} \
+              -p ${OPS_MGR_PWD} \
+              --request-timeout 3600 \
+              upload-stemcell \
+              -s stemcell/bosh-stemcell-3541.*-azure-hyperv-ubuntu-trusty-go_agent.tgz
           
 - name: wipe-env
   build_logs_to_retain: 5
