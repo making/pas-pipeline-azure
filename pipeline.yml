@@ -498,7 +498,34 @@ jobs:
               "wget -q -O "${FILENAME}" --header='Authorization: Token ${PIVNET_API_TOKEN}' ${DOWNLOAD_URL}"
           fi
 
+          set +e
+          LS=`ssh -q -i opsman.pem \
+              ${OPSMAN_DOMAIN_OR_IP_ADDRESS} \
+              -l ubuntu \
+              "ls om-linux"`
+          set -e
+          if [ "${LS}" = "om-linux" ];then
+            echo "om-linux exists"
+          else
+            echo "scp om-linux to OspManager"
+            scp  -q -i opsman.pem `which om-linux` ubuntu@${OPSMAN_DOMAIN_OR_IP_ADDRESS}:~/
+          fi
 
+          # Upload
+          ssh -q -i opsman.pem \
+            ${OPSMAN_DOMAIN_OR_IP_ADDRESS} \
+            -l ubuntu \
+            "~/om-linux --target https://localhost -k -u ${OPS_MGR_USR} -p ${OPS_MGR_PWD} --request-timeout 3600 upload-product -p ~/${FILENAME}"
+          
+          PRODUCT_NAME=`basename $FILENAME .pivotal | python -c 'print("-".join(raw_input().split("-")[0:1]))'`
+          PRODUCT_VERSION=`basename $FILENAME .pivotal | python -c 'print("-".join(raw_input().split("-")[1:2]))'`
+
+          # Stage
+          ssh -q -i opsman.pem \
+            ${OPSMAN_DOMAIN_OR_IP_ADDRESS} \
+            -l ubuntu \
+            "~/om-linux --target https://localhost -k -u ${OPS_MGR_USR} -p ${OPS_MGR_PWD} stage-product -p ${PRODUCT_NAME} -v ${PRODUCT_VERSION}"
+          
 - name: wipe-env
   build_logs_to_retain: 5
   serial_groups: [terraform]
