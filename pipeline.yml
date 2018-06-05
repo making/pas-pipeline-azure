@@ -435,7 +435,8 @@ jobs:
           chmod 400 opsman.pem
 
           cat <<EOF > /etc/ssh/ssh_config
-          ServerAliveInterval 180
+          ServerAliveInterval 60
+          ServerAliveCountMax 10
           StrictHostKeyChecking no
           EOF
 
