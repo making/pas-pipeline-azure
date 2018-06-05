@@ -258,7 +258,6 @@ jobs:
             database_type: internal
             blobstore_type: local
 
-          # az-configuration: $AVAILABILITY_ZONES
           networks-configuration:
             icmp_checks_enabled: false
             networks:
