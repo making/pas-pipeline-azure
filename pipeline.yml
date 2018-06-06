@@ -261,21 +261,21 @@ jobs:
           networks-configuration:
             icmp_checks_enabled: false
             networks:
-            - name: Management
+            - name: management
               subnets:
               - iaas_identifier: $NETWORK_NAME/$MANAGEMENT_SUBNET_NAME
                 cidr: $MANAGEMENT_SUBNET_CIDRS
                 reserved_ip_ranges: $MANAGEMENT_RESERVED_IP_RANGES
                 dns: "168.63.129.16"
                 gateway: $MANAGEMENT_SUBNET_GATEWAY
-            - name: Deployment
+            - name: deployment
               subnets:
               - iaas_identifier: $NETWORK_NAME/$PAS_SUBNET_NAME
                 cidr: $PAS_SUBNET_CIDRS
                 reserved_ip_ranges: $PAS_RESERVED_IP_RANGES
                 dns: "168.63.129.16"
                 gateway: $PAS_SUBNET_GATEWAY
-            - name: Services
+            - name: services
               subnets:
               - iaas_identifier: $NETWORK_NAME/$SERVICES_SUBNET_NAME
                 cidr: $SERVICES_SUBNET_CIDRS
@@ -284,7 +284,7 @@ jobs:
                 gateway: $SERVICES_SUBNET_GATEWAY
           network-assignment:
             network:
-              name: Management
+              name: management
           security-configuration:
             trusted_certificates: "$OPS_MGR_TRUSTED_CERTS"
             vm_password_type: generate
@@ -525,6 +525,149 @@ jobs:
             ${OPSMAN_DOMAIN_OR_IP_ADDRESS} \
             -l ubuntu \
             "~/om-linux --target https://localhost -k -u ${OPS_MGR_USR} -p ${OPS_MGR_PWD} stage-product -p ${PRODUCT_NAME} -v ${PRODUCT_VERSION}"
+
+- name: config-pas
+  build_logs_to_retain: 5
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - upload-pas
+      trigger: true
+    - get: pas
+      passed:
+      - upload-pas
+      params:
+        globs: 
+        - "cf-cli-*"
+      trigger: true
+  - task: config-pas
+    params:
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+      INTERNET_CONNECTED: ((internet_connected))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      inputs:
+      - name: terraform-state
+      - name: pas
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -e
+          cp /usr/local/bin/om-linux /usr/local/bin/om
+          cp terraform-state/terraform.tfstate ./
+          
+          OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+          RELEASE_ID=`cat pas/metadata.json | jq -r '.Release.ID'`
+          PRODUCT_ID=`cat pas/metadata.json | jq -r '.ProductFiles | map(select(.File == "Pivotal Application Service"))[0].ID'`
+          AWS_OBJECT_KEY=`cat pas/metadata.json | jq -r '.ProductFiles | map(select(.File == "Pivotal Application Service"))[0].AWSObjectKey'`
+          FILENAME=`basename ${AWS_OBJECT_KEY}`
+          PRODUCT_NAME=`basename $FILENAME .pivotal | python -c 'print("-".join(raw_input().split("-")[0:1]))'`
+          PRODUCT_VERSION=`basename $FILENAME .pivotal | python -c 'print("-".join(raw_input().split("-")[1:2]))'`
+
+          om_generate_cert() (
+            set -eu
+            local domains="$1"
+            local data=$(echo $domains | jq --raw-input -c '{"domains": (. | split(" "))}')
+            local response=$(
+              om --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+                 --username "$OPS_MGR_USR" \
+                 --password "$OPS_MGR_PWD" \
+                 --skip-ssl-validation \
+                 curl \
+                 --silent \
+                 --path "/api/v0/certificates/generate" \
+                 -x POST \
+                 -d $data
+              )
+              echo "$response"
+          )
+
+          SYSTEM_DOMAIN=system.apcf.ik.am
+          APPS_DOMAIN=apps.apcf.ik.am
+          CERTIFICATES=$(om_generate_cert "*.$APPS_DOMAIN *.$SYSTEM_DOMAIN *.uaa.$SYSTEM_DOMAIN *.login.$SYSTEM_DOMAIN")
+          PAS_CERT_PEM=`echo $CERTIFICATES | jq -r '.certificate' | sed 's/^/          /'`
+          PAS_PRIVATE_KEY_PEM=`echo $CERTIFICATES | jq -r '.key' | sed 's/^/          /'`
+          OPS_MGR_CA_CERT_PEM=$(om --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+                 --username "$OPS_MGR_USR" \
+                 --password "$OPS_MGR_PWD" \
+                 --skip-ssl-validation \
+                 curl \
+                 --silent \
+                 --path /api/v0/certificate_authorities \
+                 | jq -r '.certificate_authorities[0].cert_pem' \
+                 | sed 's/^/        /')
+          SAML_CERT=$(om_generate_cert "*.$SYSTEM_DOMAIN *.uaa.$SYSTEM_DOMAIN *.login.$SYSTEM_DOMAIN")
+          SAML_CERT_PEM=`echo $SAML_CERT | jq -r '.certificate' | sed 's/^/        /'`
+          SAML_PRIVATE_KEY_PEM=`echo $SAML_CERT | jq -r '.key' | sed 's/^/        /'`
+          MYSQL_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.resources["azurerm_lb.mysql"].attributes.private_ip_address')
+
+          cat <<EOF > config.yml
+          ---
+          product-properties:
+            .cloud_controller.system_domain:
+              value: $SYSTEM_DOMAIN
+            .cloud_controller.apps_domain:
+              value: $APPS_DOMAIN
+            .properties.routing_tls_termination:
+              value: ha_proxy # Azure
+            .properties.haproxy_forward_tls:
+              value: enable
+            .properties.haproxy_forward_tls.enable.backend_ca:
+              value: |
+          $OPS_MGR_CA_CERT_PEM
+            .properties.networking_poe_ssl_certs:
+              value:
+              - name: pas-wildcard
+                certificate:
+                  cert_pem: |
+          $PAS_CERT_PEM
+                  private_key_pem: |
+          $PAS_PRIVATE_KEY_PEM
+            .ha_proxy.skip_cert_verify:
+              value: true
+            .properties.security_acknowledgement:
+              value: X
+            .uaa.service_provider_key_credentials:
+              value:
+                cert_pem: |
+          $SAML_CERT_PEM
+                private_key_pem: |
+          $SAML_PRIVATE_KEY_PEM
+            .properties.credhub_key_encryption_passwords:
+              value: 
+              - name: key1
+                key: 
+                  secret: credhubsecret1credhubsecret1
+                primary: true
+            .mysql_monitor.recipient_email:
+              value: notify@example.com
+          network-properties:
+            network:
+              name: deployment
+            other_availability_zones:
+            - name: "null"
+            singleton_availability_zone:
+              name: "null"
+          EOF
+
+          cat config.yml
+
+          om --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+             --username "$OPS_MGR_USR" \
+             --password "$OPS_MGR_PWD" \
+             --skip-ssl-validation \
+             configure-product \
+             --product-name "${PRODUCT_NAME}" \
+             --config config.yml
 
 - name: upload-stemcell
   build_logs_to_retain: 5
