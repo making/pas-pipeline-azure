@@ -943,7 +943,7 @@ jobs:
           for e in \
             push-usage-service \
             push-apps-manager \
-            deploy-notifications \å
+            deploy-notifications \
             deploy-notifications-ui \
             push-pivotal-account \
             deploy-autoscaler \
