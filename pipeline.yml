@@ -133,6 +133,87 @@ jobs:
                     -state-out tfstate-output/terraform.tfstate \
                     terraform.tfplan
 
+- name: create-dns-records
+  build_logs_to_retain: 5
+  serial: true
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - pave-azure
+      trigger: true
+  - task: create-dns-records
+    params:
+      CLOUDFLARE_API_KEY: ((cloudflare_api_key))
+      CLOUDFLARE_EMAIL: ((cloudflare_email))
+      CLOUDFLARE_ZONE_ID: ((cloudflare_zone_id))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      inputs:
+      - name: terraform-state
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -e
+          cp terraform-state/terraform.tfstate ./
+          
+          OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+          OPSMAN_DOMAIN=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_dns.value')
+          SYSTEM_DOMAIN=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.sys_domain.value')
+          APPS_DOMAIN=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.apps_domain.value')
+          TCP_DOMAIN=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.tcp_domain.value')
+          WEB_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_public_ip.web-lb-public-ip"].primary.attributes.ip_address')
+          SSH_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_public_ip.diego-ssh-lb-public-ip"].primary.attributes.ip_address')
+          TCP_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_public_ip.tcp-lb-public-ip"].primary.attributes.ip_address')
+
+          RECORDS=""
+          RECORDS="${RECORDS} ${OPSMAN_DOMAIN},${OPSMAN_DOMAIN_OR_IP_ADDRESS}"
+          RECORDS="${RECORDS} *.${SYSTEM_DOMAIN},${WEB_LB_IP}"
+          RECORDS="${RECORDS} ssh.${SYSTEM_DOMAIN},${SSH_LB_IP}"
+          RECORDS="${RECORDS} *.${APPS_DOMAIN},${WEB_LB_IP}"
+          RECORDS="${RECORDS} ${TCP_DOMAIN},${TCP_LB_IP}"
+
+          if [ "${CLOUDFLARE_API_KEY}" = "" ];then
+            echo "CLOUDFLARE_API_KEY is not set."
+            exit 0
+          fi
+
+          DNS_RECORDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records?per_page=1000" \
+                   -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" \
+                   -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" \
+                   -H "Content-Type: application/json" \
+                   | jq -r '.result')
+
+          for r in ${RECORDS};do
+              HOSTNAME=`echo $r | awk -F ',' '{print $1}'`
+              EXTERNAL_IP=`echo $r | awk -F ',' '{print $2}'`
+              echo "$HOSTNAME  $EXTERNAL_IP"
+              RECORD=`echo $DNS_RECORDS | jq -r ". | map(select(.name == \"$HOSTNAME\"))[0]"`
+              if [ "$RECORD" != "null" ];then
+                RECORD_ID=`echo $RECORD | jq -r ".id"`
+                echo "Deleting a record ($RECORD_ID) ..."
+                curl -X DELETE "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records/${RECORD_ID}" \
+                     -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" \
+                     -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" \
+                     -H "Content-Type: application/json" \
+                     -w '\n'
+              fi
+              echo "Creating an A record"
+              echo curl -X POST "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records" \
+                   -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" \
+                   -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" \
+                   -H "Content-Type: application/json" \
+                   -d "{\"type\": \"A\", \"name\": \"$HOSTNAME\", \"content\": \"$EXTERNAL_IP\", \"proxied\": false, \"ttl\": 120}" \
+                   -w '\n'
+          done
+
 - name: config-authentication
   build_logs_to_retain: 5
   serial_groups: [terraform]
@@ -141,7 +222,7 @@ jobs:
     - get: terraform-state
       passed:
       - pave-azure
-      trigger: true
+      # trigger: true
   - task: config-director
     params:
       OPS_MGR_USR: ((ops_mgr_usr))
@@ -177,7 +258,7 @@ jobs:
             --password "$OPS_MGR_PWD" \
             --decryption-passphrase $OM_DECRYPTION_PWD
 
-- name: config-director
+- name: add-vm-types
   build_logs_to_retain: 5
   serial_groups: [terraform]
   plan:
@@ -185,6 +266,101 @@ jobs:
     - get: terraform-state
       passed:
       - config-authentication
+      trigger: true
+  - task: add-vm-types
+    params:
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+      DIRECTOR_VM_TYPE: ((director_vm_type))
+      INTERNET_CONNECTED: ((internet_connected))
+      OPS_MGR_TRUSTED_CERTS: ((ops_mgr_trusted_certs))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      inputs:
+      - name: terraform-state
+      caches:
+      - path: downloads 
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -eu
+          cp /usr/local/bin/om-linux /usr/local/bin/om
+          cp terraform-state/terraform.tfstate ./
+          cd downloads
+          if [ ! -f ./yq ];then
+            curl -Lo ./yq https://github.com/mikefarah/yq/releases/download/1.15.0/yq_linux_amd64
+          fi
+          if [ ! -f ./bosh ];then
+            curl -Lo ./bosh https://s3.amazonaws.com/bosh-cli-artifacts/bosh-cli-3.0.1-linux-amd64
+          fi
+          cd -
+          install ./downloads/yq /usr/local/bin/yq
+          install ./downloads/bosh /usr/local/bin/bosh
+
+          OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+
+          om --target https://$OPSMAN_DOMAIN_OR_IP_ADDRESS \
+             --skip-ssl-validation \
+             --username "$OPS_MGR_USR" \
+             --password "$OPS_MGR_PWD" \
+             curl \
+             --silent \
+             --path /api/v0/vm_types > vm_types.json
+
+          cat <<EOF > ops.yml
+          - type: replace
+            path: /vm_types/name=Standard_B1s?
+            value: 
+              cpu: 1
+              ephemeral_disk: 4096
+              name: Standard_B1s
+              ram: 1024
+          - type: replace
+            path: /vm_types/name=Standard_B1ms?
+            value: 
+              cpu: 1
+              ephemeral_disk: 4096
+              name: Standard_B1ms
+              ram: 2048
+          - type: replace
+            path: /vm_types/name=Standard_B2s?
+            value: 
+              cpu: 2
+              ephemeral_disk: 8192
+              name: Standard_B2s
+              ram: 4096
+          EOF
+
+          bosh int vm_types.json | yq r - -j | jq . > vm_types_old.json
+          bosh int vm_types.json -o ops.yml | yq r - -j | jq . > vm_types_new.json
+
+          diff vm_types_old.json vm_types_new.json | cat
+
+          om --target https://$OPSMAN_DOMAIN_OR_IP_ADDRESS \
+             --skip-ssl-validation \
+             --username "$OPS_MGR_USR" \
+             --password "$OPS_MGR_PWD" \
+             curl \
+             --silent \
+             --request PUT \
+             --path /api/v0/vm_types \
+             --data "$(cat vm_types_new.json)"
+
+- name: config-director
+  build_logs_to_retain: 5
+  serial_groups: [terraform]
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - add-vm-types
       trigger: true
   - task: config-director
     params:
@@ -309,20 +485,20 @@ jobs:
              --password "$OPS_MGR_PWD" \
              configure-director \
              --config config.yml
-- name: deploy-director
-  build_logs_to_retain: 5
-  plan:
-  - aggregate:
-    - get: terraform-state
-      passed:
-      - config-director
-      # trigger: true
-  - task: apply-changes
-    params:
-      OPS_MGR_USR: ((ops_mgr_usr))
-      OPS_MGR_PWD: ((ops_mgr_pwd))
-    config:
-      <<: *APPLY_CHANGES
+# - name: deploy-director
+#   build_logs_to_retain: 5
+#   plan:
+#   - aggregate:
+#     - get: terraform-state
+#       passed:
+#       - config-director
+#       # trigger: true
+#   - task: apply-changes
+#     params:
+#       OPS_MGR_USR: ((ops_mgr_usr))
+#       OPS_MGR_PWD: ((ops_mgr_pwd))
+#     config:
+#       <<: *APPLY_CHANGES
 
 - name: show-ssh-opsman-script
   build_logs_to_retain: 5
@@ -363,16 +539,6 @@ jobs:
           KEY
           ssh -i opsman.pem -o "StrictHostKeyChecking=no" -l ubuntu ${OPSMAN_DOMAIN_OR_IP_ADDRESS}
           EOF
-
-- name: deploy-pas
-  build_logs_to_retain: 5
-  plan:
-  - aggregate:
-    - get: terraform-state
-      passed:
-      - config-pas
-      - upload-stemcell
-      trigger: false
 
 - name: configure-bosh-cli
   build_logs_to_retain: 5
@@ -602,8 +768,8 @@ jobs:
               echo "$response"
           )
 
-          SYSTEM_DOMAIN=system.apcf.ik.am
-          APPS_DOMAIN=apps.apcf.ik.am
+          SYSTEM_DOMAIN=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.sys_domain.value')
+          APPS_DOMAIN=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.apps_domain.value')
           CERTIFICATES=$(om_generate_cert "*.$APPS_DOMAIN *.$SYSTEM_DOMAIN *.uaa.$SYSTEM_DOMAIN *.login.$SYSTEM_DOMAIN")
           PAS_CERT_PEM=`echo $CERTIFICATES | jq -r '.certificate' | sed 's/^/          /'`
           PAS_PRIVATE_KEY_PEM=`echo $CERTIFICATES | jq -r '.key' | sed 's/^/          /'`
@@ -700,18 +866,72 @@ jobs:
             singleton_availability_zone:
               name: "null"
           resource-config:
-            router:
-              elb_names:
-              - $WEB_LB_NAME
-            diego_brain:
-              elb_names:
-              - $SSH_LB_NAME
+            consul_server:
+              instances: 1
+            nats:
+              instances: 1
             mysql_proxy:
+              instances: 1
               elb_names:
               - $MYSQL_LB_NAME
-            # tcp_router:
+            mysql:
+              instances: 1
+              instance_type:
+                id: Standard_F2s
+              persistent_disk:
+                size_mb: "10240"
+            backup-prepare:
+              instances: 0
+            diego_database:
+              instances: 1
+            uaa:
+              instances: 1
+              instance_type:
+                id: Standard_DS1_v2
+            cloud_controller:
+              instances: 1
+            ha_proxy:
+              instances: 1
+              elb_names:
+              - $WEB_LB_NAME
+            router:
+              instances: 1
+            service-discovery-controller:
+              instances: 1
+            mysql_monitor:
+              instances: 0
+            clock_global:
+              instances: 1
+            cloud_controller_worker:
+              instances: 1
+            diego_brain:
+              instances: 1
+              elb_names:
+              - $SSH_LB_NAME
+            diego_cell:
+              instances: 1
+              instance_type:
+                id: Standard_DS11_v2
+            loggregator_trafficcontroller:
+              instances: 1
+            syslog_adapter:
+              instances: 1
+              instance_type:
+                id: Standard_F1s
+            syslog_scheduler:
+              instances: 1
+              instance_type:
+                id: Standard_F1s
+            doppler:
+              instances: 1
+              instance_type:
+                id: Standard_F1s
+            tcp_router:
+              instances: 0
             #   elb_names:
             #   - $TCP_LB_NAME
+            credhub:
+              instances: 0
           EOF
 
           cat config.yml
@@ -724,6 +944,26 @@ jobs:
              --product-name "${PRODUCT_NAME}" \
              --config config.yml
 
+          # Errands
+          for e in \
+            push-usage-service \
+            push-apps-manager \
+            deploy-notifications \å
+            deploy-notifications-ui \
+            push-pivotal-account \
+            deploy-autoscaler \
+            test-autoscaling \
+            nfsbrokerpush \
+            ;do
+            om --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+             --username "$OPS_MGR_USR" \
+             --password "$OPS_MGR_PWD" \
+             --skip-ssl-validation \
+             set-errand-state \
+             --product-name "${PRODUCT_NAME}" \
+             --errand-name="${e}" \
+             --post-deploy-state=when-changed
+          done
 - name: upload-stemcell
   build_logs_to_retain: 5
   plan:
@@ -766,7 +1006,23 @@ jobs:
               --request-timeout 3600 \
               upload-stemcell \
               -s stemcell/bosh-stemcell-3541.*-azure-hyperv-ubuntu-trusty-go_agent.tgz
-          
+
+- name: deploy-pas
+  build_logs_to_retain: 5
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - config-pas
+      - upload-stemcell
+      trigger: true
+  - task: apply-changes
+    params:
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+    config:
+      <<: *APPLY_CHANGES
+         
 - name: wipe-env
   build_logs_to_retain: 5
   serial_groups: [terraform]
