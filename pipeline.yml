@@ -206,7 +206,7 @@ jobs:
                      -w '\n'
               fi
               echo "Creating an A record"
-              echo curl -X POST "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records" \
+              curl -X POST "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/dns_records" \
                    -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" \
                    -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" \
                    -H "Content-Type: application/json" \
@@ -222,7 +222,7 @@ jobs:
     - get: terraform-state
       passed:
       - pave-azure
-      # trigger: true
+      trigger: true
   - task: config-director
     params:
       OPS_MGR_USR: ((ops_mgr_usr))
@@ -272,7 +272,6 @@ jobs:
       OPS_MGR_USR: ((ops_mgr_usr))
       OPS_MGR_PWD: ((ops_mgr_pwd))
       DIRECTOR_VM_TYPE: ((director_vm_type))
-      INTERNET_CONNECTED: ((internet_connected))
       OPS_MGR_TRUSTED_CERTS: ((ops_mgr_trusted_certs))
     config:
       platform: linux
@@ -367,7 +366,6 @@ jobs:
       OPS_MGR_USR: ((ops_mgr_usr))
       OPS_MGR_PWD: ((ops_mgr_pwd))
       DIRECTOR_VM_TYPE: ((director_vm_type))
-      INTERNET_CONNECTED: ((internet_connected))
       OPS_MGR_TRUSTED_CERTS: ((ops_mgr_trusted_certs))
     config:
       platform: linux
@@ -470,11 +468,9 @@ jobs:
             director:
               instance_type:
                 id: $DIRECTOR_VM_TYPE
-              internet_connected: $INTERNET_CONNECTED
             compilation:
               instance_type:
                 id: automatic
-              internet_connected: $INTERNET_CONNECTED
           EOF
 
           cat config.yml
@@ -722,7 +718,6 @@ jobs:
     params:
       OPS_MGR_USR: ((ops_mgr_usr))
       OPS_MGR_PWD: ((ops_mgr_pwd))
-      INTERNET_CONNECTED: ((internet_connected))
     config:
       platform: linux
       image_resource:
@@ -1062,7 +1057,7 @@ jobs:
             --skip-ssl-validation \
             --username "$OPS_MGR_USR" \
             --password "$OPS_MGR_PWD" \
-            --request-timeout 900 \
+            --request-timeout 60 \
             delete-installation
   - task: terraform-destory
     params:
