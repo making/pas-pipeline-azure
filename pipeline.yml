@@ -120,6 +120,8 @@ jobs:
           cat <<EOF > terraform.tfvars
           ${TFVARS}
           EOF
+          # decrease lb rules
+          sed -i 's/150/5/g' template/tcplb.tf
           terraform init \
                     template
           terraform plan \
@@ -314,7 +316,7 @@ jobs:
     - get: terraform-state
       passed:
       - config-director
-      trigger: true
+      # trigger: true
   - task: apply-changes
     params:
       OPS_MGR_USR: ((ops_mgr_usr))
@@ -362,13 +364,23 @@ jobs:
           ssh -i opsman.pem -o "StrictHostKeyChecking=no" -l ubuntu ${OPSMAN_DOMAIN_OR_IP_ADDRESS}
           EOF
 
+- name: deploy-pas
+  build_logs_to_retain: 5
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - config-pas
+      - upload-stemcell
+      trigger: false
+
 - name: configure-bosh-cli
   build_logs_to_retain: 5
   plan:
   - aggregate:
     - get: terraform-state
       passed:
-      - deploy-director
+      - deploy-pas
       trigger: true
   - task: configure-bosh-cli
     params:
@@ -431,7 +443,7 @@ jobs:
   - aggregate:
     - get: terraform-state
       passed:
-      - deploy-director
+      - config-director
       trigger: true
     - get: pas
       params:
@@ -481,14 +493,13 @@ jobs:
           EOF
 
           set +e
-          SHA256SUM=`ssh -q -i opsman.pem \
+          LS=`ssh -q -i opsman.pem \
               ${OPSMAN_DOMAIN_OR_IP_ADDRESS} \
               -l ubuntu \
-              "sha256sum ${FILENAME}" | awk '{print $1}'`
+              "ls ${FILENAME}"`
           set -e
-          echo ${SHA256SUM}
-          echo ${SHA256}
-          if [ "${SHA256SUM}" = "${SHA256}" ];then
+          echo "ls => ${LS}"
+          if [ "${LS}" = "${FILENAME}" ];then
             echo "${FILENAME} exists"
           else
             echo "Downloading ${FILENAME} from ${DOWNLOAD_URL} on OspMamager"
@@ -608,7 +619,17 @@ jobs:
           SAML_CERT=$(om_generate_cert "*.$SYSTEM_DOMAIN *.uaa.$SYSTEM_DOMAIN *.login.$SYSTEM_DOMAIN")
           SAML_CERT_PEM=`echo $SAML_CERT | jq -r '.certificate' | sed 's/^/        /'`
           SAML_PRIVATE_KEY_PEM=`echo $SAML_CERT | jq -r '.key' | sed 's/^/        /'`
-          MYSQL_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.resources["azurerm_lb.mysql"].attributes.private_ip_address')
+          MYSQL_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_lb.mysql"].primary.attributes.private_ip_address')
+          AZURE_STORAGE_ACCOUNT_NAME=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.cf_storage_account_name.value')
+          AZURE_STORAGE_ACCESS_KEY=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.cf_storage_account_access_key.value')
+          AZURE_STORAGE_BUILDPACKS_CONTAINER=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.cf_buildpacks_storage_container.value')
+          AZURE_STORAGE_DROPLETS_CONTAINER=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.cf_droplets_storage_container.value')
+          AZURE_STORAGE_PACKAGES_CONTAINER=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.cf_packages_storage_container.value')
+          AZURE_STORAGE_RESOURCES_CONTAINER=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.cf_resources_storage_container.value')
+          WEB_LB_NAME=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.web_lb_name.value')
+          SSH_LB_NAME=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.diego_ssh_lb_name.value')
+          MYSQL_LB_NAME=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.mysql_lb_name.value')
+          TCP_LB_NAME=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.tcp_lb_name.value')
 
           cat <<EOF > config.yml
           ---
@@ -634,8 +655,12 @@ jobs:
           $PAS_PRIVATE_KEY_PEM
             .ha_proxy.skip_cert_verify:
               value: true
+            .router.frontend_idle_timeout: # By default, Azure load balancer times out at 240 seconds without sending a TCP RST to clients, so as an exception, Pivotal recommends a value lower than 240 to force the load balancer to send the TCP RST.
+              value: 239
             .properties.security_acknowledgement:
               value: X
+            .properties.enable_service_discovery_for_apps:
+              value: true
             .uaa.service_provider_key_credentials:
               value:
                 cert_pem: |
@@ -648,8 +673,25 @@ jobs:
                 key: 
                   secret: credhubsecret1credhubsecret1
                 primary: true
+            .mysql_proxy.service_hostname:
+              value: $MYSQL_LB_IP
             .mysql_monitor.recipient_email:
               value: notify@example.com
+            .properties.system_blobstore:
+              value: external_azure
+            .properties.system_blobstore.external_azure.account_name:
+              value: $AZURE_STORAGE_ACCOUNT_NAME
+            .properties.system_blobstore.external_azure.access_key:
+              value: 
+                secret: "$AZURE_STORAGE_ACCESS_KEY"
+            .properties.system_blobstore.external_azure.buildpacks_container:
+              value: $AZURE_STORAGE_BUILDPACKS_CONTAINER
+            .properties.system_blobstore.external_azure.droplets_container:
+              value: $AZURE_STORAGE_DROPLETS_CONTAINER
+            .properties.system_blobstore.external_azure.packages_container:
+              value: $AZURE_STORAGE_PACKAGES_CONTAINER
+            .properties.system_blobstore.external_azure.resources_container:
+              value: $AZURE_STORAGE_RESOURCES_CONTAINER
           network-properties:
             network:
               name: deployment
@@ -657,6 +699,19 @@ jobs:
             - name: "null"
             singleton_availability_zone:
               name: "null"
+          resource-config:
+            router:
+              elb_names:
+              - $WEB_LB_NAME
+            diego_brain:
+              elb_names:
+              - $SSH_LB_NAME
+            mysql_proxy:
+              elb_names:
+              - $MYSQL_LB_NAME
+            # tcp_router:
+            #   elb_names:
+            #   - $TCP_LB_NAME
           EOF
 
           cat config.yml
