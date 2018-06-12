@@ -29,13 +29,13 @@ resources:
   source:
     api_token: ((pivnet_api_token))
     product_slug: elastic-runtime
-    product_version: 2\.1\.*
+    product_version: 2\.1\..*
 - name: stemcell
   type: pivnet
   source:
     api_token: ((pivnet_api_token))
     product_slug: stemcells
-    product_version: 3541\.*
+    product_version: 3541\..*
 
 jobs:
 - name: bootstrap-terraform-state
