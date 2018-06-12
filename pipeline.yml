@@ -911,12 +911,8 @@ jobs:
               instances: 1
             syslog_adapter:
               instances: 1
-              instance_type:
-                id: Standard_F1s
             syslog_scheduler:
               instances: 1
-              instance_type:
-                id: Standard_F1s
             doppler:
               instances: 1
               instance_type:
