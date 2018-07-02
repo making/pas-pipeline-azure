@@ -315,6 +315,20 @@ jobs:
 
           cat <<EOF > ops.yml
           - type: replace
+            path: /vm_types/name=Standard_DS1_v2?
+            value: 
+              cpu: 1
+              ephemeral_disk: 51200
+              name: Standard_DS1_v2
+              ram: 4096
+          - type: replace
+            path: /vm_types/name=Standard_DS2_v2?
+            value: 
+              cpu: 2
+              ephemeral_disk: 102400
+              name: Standard_DS2_v2
+              ram: 8192
+          - type: replace
             path: /vm_types/name=Standard_B1s?
             value: 
               cpu: 1
@@ -542,8 +556,7 @@ jobs:
   - aggregate:
     - get: terraform-state
       passed:
-      - deploy-pas
-      trigger: true
+      - config-pas
   - task: configure-bosh-cli
     params:
       PIVNET_API_TOKEN: ((pivnet_api_token))
