@@ -611,7 +611,7 @@ jobs:
           ssh -q -i opsman.pem \
             -o "StrictHostKeyChecking=no" \
             ubuntu@${OPSMAN_DOMAIN_OR_IP_ADDRESS} "echo $BOSH_CLI | sed 's/ /\n/g' | sed 's/^/export /g' | sed '/bosh/d' | sudo tee /etc/profile.d/bosh.sh" > /dev/null
-            
+
 - name: upload-pas
   build_logs_to_retain: 5
   plan:
@@ -833,6 +833,10 @@ jobs:
               value: 239
             .properties.security_acknowledgement:
               value: X
+            .properties.secure_service_instance_credentials:
+              value: true
+            .properties.cf_networking_enable_space_developer_self_service:
+              value: true
             .properties.enable_service_discovery_for_apps:
               value: true
             .uaa.service_provider_key_credentials:
@@ -866,6 +870,8 @@ jobs:
               value: $AZURE_STORAGE_PACKAGES_CONTAINER
             .properties.system_blobstore.external_azure.resources_container:
               value: $AZURE_STORAGE_RESOURCES_CONTAINER
+            .properties.autoscale_instance_count:
+              value: 1
           network-properties:
             network:
               name: deployment
@@ -1100,6 +1106,63 @@ jobs:
                     -state-out tfstate-output/terraform.tfstate \
                     template
 
+- name: show-cf-login-as-admin
+  build_logs_to_retain: 5
+  plan:
+  - aggregate:
+    - get: terraform-state
+      passed:
+      - config-pas
+      # - deploy-pas
+  - task: show-cf-login-as-admin
+    params:
+      PIVNET_API_TOKEN: ((pivnet_api_token))
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      inputs:
+      - name: terraform-state
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -e
+          cp /usr/local/bin/om-linux /usr/local/bin/om
+          cp terraform-state/terraform.tfstate ./
+          OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+          SYSTEM_DOMAIN=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.sys_domain.value')
+          
+          PRODUCT_GUID=$(om \
+                --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+                --username "$OPS_MGR_USR" \
+                --password "$OPS_MGR_PWD" \
+                --skip-ssl-validation \
+                curl \
+                --silent \
+                --path "/api/v0/staged/products" \
+                -x GET \
+                | jq -r '.[] | select(.type == "cf") | .guid')
+          ADMIN_CREDENTIALS=$(om \
+                --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+                --username "$OPS_MGR_USR" \
+                --password "$OPS_MGR_PWD" \
+                --skip-ssl-validation \
+                curl \
+                --silent \
+                --path "/api/v0/deployed/products/${PRODUCT_GUID}/credentials/.uaa.admin_credentials" \
+                -x GET \
+                | jq -r '.credential.value.password')
+
+          cat <<EOF
+          cf login --skip-ssl-validation -a api.${SYSTEM_DOMAIN} -u admin -p ${ADMIN_CREDENTIALS} 
+          EOF
 params: 
   apply-changes: &APPLY_CHANGES
     platform: linux
