@@ -731,6 +731,12 @@ jobs:
     params:
       OPS_MGR_USR: ((ops_mgr_usr))
       OPS_MGR_PWD: ((ops_mgr_pwd))
+      SMTP_FROM: ((smtp_from))
+      SMTP_ADDRESS: ((smtp_address)) 
+      SMTP_PORT: ((smtp_port))
+      SMTP_USERNAME: ((smtp_username))
+      SMTP_PASSWORD: ((smtp_password))
+      SMTP_ENABLE_STARTTLS: ((smtp_enable_starttls))
     config:
       platform: linux
       image_resource:
@@ -872,6 +878,18 @@ jobs:
               value: $AZURE_STORAGE_RESOURCES_CONTAINER
             .properties.autoscale_instance_count:
               value: 1
+            .properties.smtp_from:
+              value: $SMTP_FROM
+            .properties.smtp_address:
+              value: $SMTP_ADDRESS
+            .properties.smtp_port:
+              value: $SMTP_PORT
+            .properties.smtp_credentials:
+              value:
+                identity: $SMTP_USERNAME
+                password: $SMTP_PASSWORD
+            .properties.smtp_enable_starttls_auto:
+              value: $SMTP_ENABLE_STARTTLS
           network-properties:
             network:
               name: deployment
