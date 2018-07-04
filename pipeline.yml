@@ -36,54 +36,24 @@ resources:
     api_token: ((pivnet_api_token))
     product_slug: stemcells
     product_version: 3541\..*
-
+- name: pcf-pipelines
+  type: git
+  source:
+    uri: https://github.com/pivotal-cf/pcf-pipelines.git
+    tag_filter: v0.23.6
 jobs:
 - name: bootstrap-terraform-state
   build_logs_to_retain: 5
   serial: true
   plan:
+  - aggregate:
+    - get: pcf-pipelines
   - task: create-terraform-state
     params:
       AZURE_STORAGE_ACCOUNT: ((terraform_azure_storage_account_name))
       AZURE_STORAGE_KEY: ((terraform_azure_storage_access_key))
       CONTAINER: ((azure_storage_container_name))
-    config:
-      platform: linux
-      image_resource:
-        type: docker-image
-        source:
-          repository: pcfnorm/rootfs
-          tag: 1.0.14
-      run:
-        path: bash
-        args: 
-        - -c
-        - |
-          # https://github.com/pivotal-cf/pcf-pipelines/blob/v0.23.4/install-pcf/azure/tasks/create-initial-terraform-state/task.sh
-          blobs=$(az storage blob list -c ${CONTAINER})
-          files=$(echo "$blobs" | jq -r .[].name)
-
-          set +e
-          echo ${files} | grep terraform.tfstate
-          if [ "$?" -gt "0" ]; then
-            echo "{\"version\": 3}" > terraform.tfstate
-            az storage blob upload -c ${CONTAINER} -n terraform.tfstate -f terraform.tfstate
-            set +x
-            if [ "$?" -gt "0" ]; then
-              echo "Failed to upload empty tfstate file"
-              exit 1
-            fi
-            set -x
-            az storage blob snapshot -c ${CONTAINER} -n terraform.tfstate
-            set +x
-            if [ "$?" -gt "0" ]; then
-              echo "Failed to create snapshot of tfstate file"
-              exit 1
-            fi
-          else
-            echo "terraform.tfstate file found, skipping"
-            exit 0
-          fi
+    file: pcf-pipelines/install-pcf/azure/tasks/create-initial-terraform-state/task.yml
 
 - name: pave-azure
   build_logs_to_retain: 5
@@ -223,7 +193,8 @@ jobs:
       passed:
       - pave-azure
       trigger: true
-  - task: config-director
+    - get: pcf-pipelines
+  - task: config-opsman
     params:
       OPS_MGR_USR: ((ops_mgr_usr))
       OPS_MGR_PWD: ((ops_mgr_pwd))
@@ -237,26 +208,16 @@ jobs:
           tag: 1.0.14
       inputs:
       - name: terraform-state
+      - name: pcf-pipelines
       run:
         path: bash
         args: 
         - -c
         - |
           set -eu          
-          OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+          export OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
           echo "OSPMAN: https://$OPSMAN_DOMAIN_OR_IP_ADDRESS"
-          until $(curl --output /dev/null -k --silent --head --fail https://$OPSMAN_DOMAIN_OR_IP_ADDRESS/setup); do
-              printf '.'
-              sleep 5
-          done
-
-          om-linux \
-            --target https://$OPSMAN_DOMAIN_OR_IP_ADDRESS \
-            --skip-ssl-validation \
-            configure-authentication \
-            --username "$OPS_MGR_USR" \
-            --password "$OPS_MGR_PWD" \
-            --decryption-passphrase $OM_DECRYPTION_PWD
+          ./pcf-pipelines/tasks/config-opsman/task.sh
 
 - name: add-vm-types
   build_logs_to_retain: 5
@@ -495,20 +456,6 @@ jobs:
              --password "$OPS_MGR_PWD" \
              configure-director \
              --config config.yml
-# - name: deploy-director
-#   build_logs_to_retain: 5
-#   plan:
-#   - aggregate:
-#     - get: terraform-state
-#       passed:
-#       - config-director
-#       # trigger: true
-#   - task: apply-changes
-#     params:
-#       OPS_MGR_USR: ((ops_mgr_usr))
-#       OPS_MGR_PWD: ((ops_mgr_pwd))
-#     config:
-#       <<: *APPLY_CHANGES
 
 - name: show-ssh-opsman-script
   build_logs_to_retain: 5
@@ -959,7 +906,7 @@ jobs:
             #   elb_names:
             #   - $TCP_LB_NAME
             credhub:
-              instances: 0
+              instances: 1
           EOF
 
           cat config.yml
@@ -1044,13 +991,34 @@ jobs:
       - config-pas
       - upload-stemcell
       trigger: true
+    - get: pcf-pipelines
   - task: apply-changes
     params:
-      OPS_MGR_USR: ((ops_mgr_usr))
-      OPS_MGR_PWD: ((ops_mgr_pwd))
+      OPSMAN_USERNAME: ((ops_mgr_usr))
+      OPSMAN_PASSWORD: ((ops_mgr_pwd))
+      OPSMAN_CLIENT_ID: ""
+      OPSMAN_CLIENT_SECRET: ""
     config:
-      <<: *APPLY_CHANGES
-         
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      inputs:
+      - name: terraform-state
+      - name: pcf-pipelines
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -eu
+          export OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
+          echo "Applying changes on Ops Manager @ ${OPSMAN_DOMAIN_OR_IP_ADDRESS}"
+          
+          ./pcf-pipelines/tasks/apply-changes/task.sh
+
 - name: wipe-env
   build_logs_to_retain: 5
   serial_groups: [terraform]
@@ -1065,6 +1033,7 @@ jobs:
       passed:
       - config-authentication
       #trigger: true
+    - get: pcf-pipelines
   - task: delete-installation
     params:
       OPS_MGR_USR: ((ops_mgr_usr))
@@ -1078,6 +1047,7 @@ jobs:
           tag: 1.0.14
       inputs:
       - name: terraform-state
+      - name: pcf-pipelines
       run:
         path: bash
         args: 
@@ -1181,29 +1151,3 @@ jobs:
           cat <<EOF
           cf login --skip-ssl-validation -a api.${SYSTEM_DOMAIN} -u admin -p ${ADMIN_CREDENTIALS} 
           EOF
-params: 
-  apply-changes: &APPLY_CHANGES
-    platform: linux
-    image_resource:
-      type: docker-image
-      source:
-        repository: pcfnorm/rootfs
-        tag: 1.0.14
-    inputs:
-    - name: terraform-state
-    run:
-      path: bash
-      args: 
-      - -c
-      - |
-        set -eu
-        OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
-        echo "Applying changes on Ops Manager @ ${OPSMAN_DOMAIN_OR_IP_ADDRESS}"
-
-        om-linux \
-          --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
-          --skip-ssl-validation \
-          --username "${OPS_MGR_USR}" \
-          --password "${OPS_MGR_PWD}" \
-          apply-changes \
-          --ignore-warnings
