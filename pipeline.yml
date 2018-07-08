@@ -769,6 +769,7 @@ jobs:
       SMTP_PASSWORD: ((smtp_password))
       SMTP_ENABLE_STARTTLS: ((smtp_enable_starttls))
       CLOUDFLARE_API_KEY: ((cloudflare_api_key))
+      PRODUCT_NAME: "elastic-runtime"
     config:
       platform: linux
       image_resource:
@@ -790,12 +791,6 @@ jobs:
           cp terraform-state/terraform.tfstate ./
           
           OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
-          RELEASE_ID=`cat pas/metadata.json | jq -r '.Release.ID'`
-          PRODUCT_ID=`cat pas/metadata.json | jq -r '.ProductFiles | map(select(.File == "Pivotal Application Service"))[0].ID'`
-          AWS_OBJECT_KEY=`cat pas/metadata.json | jq -r '.ProductFiles | map(select(.File == "Pivotal Application Service"))[0].AWSObjectKey'`
-          FILENAME=`basename ${AWS_OBJECT_KEY}`
-          PRODUCT_NAME=`basename $FILENAME .pivotal | python -c 'print("-".join(raw_input().split("-")[0:1]))'`
-          PRODUCT_VERSION=`basename $FILENAME .pivotal | python -c 'print("-".join(raw_input().split("-")[1:2]))'`
 
           source pcf-pipelines/functions/generate_cert.sh
 
