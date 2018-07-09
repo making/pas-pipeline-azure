@@ -769,7 +769,7 @@ jobs:
       SMTP_PASSWORD: ((smtp_password))
       SMTP_ENABLE_STARTTLS: ((smtp_enable_starttls))
       CLOUDFLARE_API_KEY: ((cloudflare_api_key))
-      PRODUCT_NAME: "elastic-runtime"
+      PRODUCT_NAME: "cf"
     config:
       platform: linux
       image_resource:
