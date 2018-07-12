@@ -1345,7 +1345,7 @@ jobs:
           cp terraform-state/terraform.tfstate ./
           OPSMAN_DOMAIN_OR_IP_ADDRESS=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.ops_manager_ip.value')
           if [ "${CLOUDFLARE_API_KEY}" = "" ];then
-            WEB_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].outputs.web_lb_ip.value')
+            WEB_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_public_ip.web-lb-public-ip"].primary.attributes.ip_address')
             SYSTEM_DOMAIN=sys.$(echo $WEB_LB_IP | tr '.' '-').sslip.io
             ISO_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[1].resources["azurerm_public_ip.iso-lb-public-ip"].primary.attributes.ip_address')
             ISO_DOMAIN=iso.$(echo $ISO_LB_IP | tr '.' '-').sslip.io
