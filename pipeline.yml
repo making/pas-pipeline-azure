@@ -15,8 +15,7 @@ resources:
 - name: template
   type: git
   source:
-    uri: https://github.com/pivotal-cf/terraforming-azure.git
-    tag_filter: v0.12.0
+    uri: https://github.com/jacopen/terraforming-azure.git
 - name: terraform-state
   type: azure-blobstore
   source:
@@ -29,24 +28,23 @@ resources:
   source:
     api_token: ((pivnet_api_token))
     product_slug: elastic-runtime
-    product_version: 2\.1\..*
+    product_version: 2\.5\..*
 - name: isolation-segment
   type: pivnet
   source:
     api_token: ((pivnet_api_token))
     product_slug: p-isolation-segment
-    product_version: 2\.1\..*
+    product_version: 2\.5\..*
 - name: stemcell
   type: pivnet
   source:
     api_token: ((pivnet_api_token))
-    product_slug: stemcells
-    product_version: 3541\..*
+    product_slug: stemcells-ubuntu-xenial
+    product_version: 250\..*
 - name: pcf-pipelines
   type: git
   source:
     uri: https://github.com/pivotal-cf/pcf-pipelines.git
-    tag_filter: v0.23.6
 jobs:
 - name: bootstrap-terraform-state
   build_logs_to_retain: 5
@@ -81,7 +79,7 @@ jobs:
         type: docker-image
         source:
           repository: hashicorp/terraform
-          tag: light
+          tag: 0.11.14
       inputs:
       - name: template
       - name: terraform-state
@@ -96,18 +94,14 @@ jobs:
           cat <<EOF > terraform.tfvars
           ${TFVARS}
           EOF
-          
-          # Customize
-          ## decrease lb rules
-          sed -i 's/150/5/g' template/tcplb.tf
 
           terraform init \
-                    template
+                    template/terraforming-pas
           terraform plan \
                     -var-file terraform.tfvars \
                     -out terraform.tfplan \
                     -state terraform-state/terraform.tfstate \
-                    template
+                    template/terraforming-pas
           terraform apply \
                     -state-out tfstate-output/terraform.tfstate \
                     terraform.tfplan
@@ -402,9 +396,9 @@ jobs:
             resource_group_name: $RESOURCE_GROUP_NAME
             bosh_storage_account_name: $BOSH_STORAGE_ACCOUNT_NAME
             cloud_storage_type: storage_accounts
-            deployments_storage_account_name:  "$DEPLOYMENTS_STORAGE_ACCOUNT_NAME"
-            # cloud_storage_type: managed_disks
-            # storage_account_type: Standard_LRS
+            #deployments_storage_account_name:  "$DEPLOYMENTS_STORAGE_ACCOUNT_NAME"
+            cloud_storage_type: managed_disks
+            storage_account_type: Premium_LRS
             default_security_group: $DEFAULT_SECURITY_GROUP
             ssh_public_key: |
           $OPS_MANAGER_SSH_PUBLIC_KEY
@@ -445,6 +439,8 @@ jobs:
           network-assignment:
             network:
               name: management
+            singleton_availability_zone:
+              name: zone-1
           security-configuration:
             trusted_certificates: "$OPS_MGR_TRUSTED_CERTS"
             vm_password_type: generate
@@ -795,9 +791,9 @@ jobs:
           source pcf-pipelines/functions/generate_cert.sh
 
           if [ "${CLOUDFLARE_API_KEY}" = "" ];then
-            WEB_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_public_ip.web-lb-public-ip"].primary.attributes.ip_address')
-            SSH_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_public_ip.diego-ssh-lb-public-ip"].primary.attributes.ip_address')
-            TCP_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[0].resources["azurerm_public_ip.tcp-lb-public-ip"].primary.attributes.ip_address')
+            WEB_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[] | select(.path[1] == "pas") | .resources["azurerm_public_ip.web-lb-public-ip"].primary.attributes.ip_address')
+            SSH_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[] | select(.path[1] == "pas") | .resources["azurerm_public_ip.diego-ssh-lb-public-ip"].primary.attributes.ip_address')
+            TCP_LB_IP=$(cat terraform-state/terraform.tfstate | jq -r '.modules[] | select(.path[1] == "pas") | .resources["azurerm_public_ip.tcp-lb-public-ip"].primary.attributes.ip_address')
             SYSTEM_DOMAIN=sys.$(echo $WEB_LB_IP | tr '.' '-').sslip.io
             APPS_DOMAIN=apps.$(echo $WEB_LB_IP | tr '.' '-').sslip.io
           else
@@ -863,8 +859,6 @@ jobs:
               value: true
             .properties.cf_networking_enable_space_developer_self_service:
               value: true
-            .properties.enable_service_discovery_for_apps:
-              value: true
             .uaa.service_provider_key_credentials:
               value:
                 cert_pem: |
@@ -910,16 +904,16 @@ jobs:
                 password: $SMTP_PASSWORD
             .properties.smtp_enable_starttls_auto:
               value: $SMTP_ENABLE_STARTTLS
+            .properties.stack_migration_acknowledgement:
+              value: X
           network-properties:
             network:
               name: deployment
             other_availability_zones:
-            - name: "null"
+            - name: zone-1
             singleton_availability_zone:
-              name: "null"
+              name: zone-1
           resource-config:
-            consul_server:
-              instances: 1
             nats:
               instances: 1
             mysql_proxy:
@@ -932,7 +926,7 @@ jobs:
                 id: Standard_F2s
               persistent_disk:
                 size_mb: "10240"
-            backup-prepare:
+            backup_restore:
               instances: 0
             diego_database:
               instances: 1
@@ -948,8 +942,6 @@ jobs:
               instances: 1
               elb_names:
               - $WEB_LB_NAME
-            service-discovery-controller:
-              instances: 1
             mysql_monitor:
               instances: 0
             clock_global:
@@ -973,7 +965,7 @@ jobs:
             doppler:
               instances: 1
               instance_type:
-                id: Standard_F1s
+                id: Standard_DS1_v2
             tcp_router:
               instances: 0
             #   elb_names:
@@ -998,7 +990,6 @@ jobs:
             push-apps-manager \
             deploy-notifications \
             deploy-notifications-ui \
-            push-pivotal-account \
             deploy-autoscaler \
             test-autoscaling \
             nfsbrokerpush \
@@ -1023,7 +1014,7 @@ jobs:
     - get: stemcell
       params:
         globs: 
-        - "bosh-stemcell-3541\\.*-azure-hyperv-ubuntu-trusty-go_agent\\.tgz"
+        - "bosh-stemcell-250\\.*-azure-hyperv-ubuntu-xenial-go_agent\\.tgz"
       trigger: true
   - task: upload-stemcell
     params:
@@ -1053,7 +1044,7 @@ jobs:
               -p ${OPS_MGR_PWD} \
               --request-timeout 3600 \
               upload-stemcell \
-              -s stemcell/bosh-stemcell-3541.*-azure-hyperv-ubuntu-trusty-go_agent.tgz
+              -s stemcell/bosh-stemcell-250.*-azure-hyperv-ubuntu-xenial-go_agent.tgz
 
 - name: deploy-pas
   build_logs_to_retain: 5
@@ -1439,7 +1430,7 @@ jobs:
         type: docker-image
         source:
           repository: hashicorp/terraform
-          tag: light
+          tag: 0.11.14
       inputs:
       - name: template
       - name: terraform-state
